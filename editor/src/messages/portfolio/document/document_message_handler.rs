@@ -3,7 +3,7 @@ use super::node_graph::utility_types::Transform;
 use super::overlays::utility_types::Pivot;
 use super::utility_types::clipboards::Clipboard;
 use super::utility_types::error::EditorError;
-use super::utility_types::misc::{SnappingOptions, SnappingState, GET_SNAP_BOX_FUNCTIONS, GET_SNAP_GEOMETRY_FUNCTIONS};
+use super::utility_types::misc::{SnappingOptions, SnappingState, SNAP_FUNCTIONS_FOR_BOUNDING_BOXES, SNAP_FUNCTIONS_FOR_PATHS};
 use super::utility_types::network_interface::{self, NodeNetworkInterface, TransactionStatus};
 use super::utility_types::nodes::{CollapsedLayers, SelectedNodes};
 use crate::application::{generate_uuid, GRAPHITE_GIT_COMMIT_HASH};
@@ -275,10 +275,10 @@ impl MessageHandler<DocumentMessage, DocumentMessageData<'_>> for DocumentMessag
 				let data_buffer: RawBuffer = Self::default().serialize_root();
 				responses.add(FrontendMessage::UpdateDocumentLayerStructure { data_buffer });
 
-				// Clear the options bar
+				// Clear the control bar
 				responses.add(LayoutMessage::SendLayout {
 					layout: Layout::WidgetLayout(Default::default()),
-					layout_target: LayoutTarget::LayersPanelOptions,
+					layout_target: LayoutTarget::LayersPanelControlBar,
 				});
 			}
 			DocumentMessage::InsertBooleanOperation { operation } => {
@@ -350,7 +350,7 @@ impl MessageHandler<DocumentMessage, DocumentMessageData<'_>> for DocumentMessag
 			DocumentMessage::DocumentHistoryBackward => self.undo_with_history(ipp, responses),
 			DocumentMessage::DocumentHistoryForward => self.redo_with_history(ipp, responses),
 			DocumentMessage::DocumentStructureChanged => {
-				self.update_layers_panel_options_bar_widgets(responses);
+				self.update_layers_panel_control_bar_widgets(responses);
 
 				self.network_interface.load_structure();
 				let data_buffer: RawBuffer = self.serialize_root();
@@ -1654,9 +1654,18 @@ impl DocumentMessageHandler {
 
 	/// Finds the artboard that bounds the point in viewport space and be the container of any newly added layers.
 	pub fn new_layer_bounding_artboard(&self, ipp: &InputPreprocessorMessageHandler) -> LayerNodeIdentifier {
-		self.click_xray(ipp)
+		let container_based_on_selection = self.new_layer_parent(true);
+
+		let container_based_on_clicked_artboard = self
+			.click_xray(ipp)
 			.find(|layer| self.network_interface.is_artboard(&layer.to_node(), &[]))
-			.unwrap_or(LayerNodeIdentifier::ROOT_PARENT)
+			.unwrap_or(LayerNodeIdentifier::ROOT_PARENT);
+
+		if container_based_on_selection.ancestors(self.metadata()).any(|ancestor| ancestor == container_based_on_clicked_artboard) {
+			container_based_on_selection
+		} else {
+			container_based_on_clicked_artboard
+		}
 	}
 
 	/// Finds the parent folder which, based on the current selections, should be the container of any newly added layers.
@@ -1779,28 +1788,27 @@ impl DocumentMessageHandler {
 						},
 					]
 					.into_iter()
-					.chain(GET_SNAP_BOX_FUNCTIONS.into_iter().map(|(name, closure)| LayoutGroup::Row {
+					.chain(SNAP_FUNCTIONS_FOR_BOUNDING_BOXES.into_iter().map(|(name, closure, tooltip)| LayoutGroup::Row {
 						widgets: vec![
 									CheckboxInput::new(*closure(&mut snapping_state))
 										.on_update(move |input: &CheckboxInput| DocumentMessage::SetSnapping { closure: Some(closure), snapping_state: input.checked }.into())
+										.tooltip(tooltip)
 										.widget_holder(),
-									TextLabel::new(name).widget_holder(),
+									TextLabel::new(name).tooltip(tooltip).widget_holder(),
 								],
 					}))
-					.chain(
-						[LayoutGroup::Row {
-							widgets: vec![TextLabel::new(SnappingOptions::Geometry.to_string()).widget_holder()],
-						}]
-						.into_iter()
-						.chain(GET_SNAP_GEOMETRY_FUNCTIONS.into_iter().map(|(name, closure)| LayoutGroup::Row {
-							widgets: vec![
+					.chain([LayoutGroup::Row {
+						widgets: vec![TextLabel::new(SnappingOptions::Paths.to_string()).widget_holder()],
+					}])
+					.chain(SNAP_FUNCTIONS_FOR_PATHS.into_iter().map(|(name, closure, tooltip)| LayoutGroup::Row {
+						widgets: vec![
 									CheckboxInput::new(*closure(&mut snapping_state2))
 										.on_update(move |input: &CheckboxInput| DocumentMessage::SetSnapping { closure: Some(closure), snapping_state: input.checked }.into())
+										.tooltip(tooltip)
 										.widget_holder(),
-									TextLabel::new(name).widget_holder(),
+									TextLabel::new(name).tooltip(tooltip).widget_holder(),
 								],
-						})),
-					)
+					}))
 					.collect(),
 				)
 				.widget_holder(),
@@ -1901,7 +1909,7 @@ impl DocumentMessageHandler {
 		});
 	}
 
-	pub fn update_layers_panel_options_bar_widgets(&self, responses: &mut VecDeque<Message>) {
+	pub fn update_layers_panel_control_bar_widgets(&self, responses: &mut VecDeque<Message>) {
 		// Get an iterator over the selected layers (excluding artboards which don't have an opacity or blend mode).
 		let selected_nodes = self.network_interface.selected_nodes(&[]).unwrap();
 		let selected_layers_except_artboards = selected_nodes.selected_layers_except_artboards(&self.network_interface);
@@ -1969,7 +1977,7 @@ impl DocumentMessageHandler {
 			.selected_layers(self.metadata())
 			.all(|layer| self.network_interface.is_locked(&layer.to_node(), &[]));
 
-		let layers_panel_options_bar = WidgetLayout::new(vec![LayoutGroup::Row {
+		let layers_panel_control_bar = WidgetLayout::new(vec![LayoutGroup::Row {
 			widgets: vec![
 				DropdownInput::new(blend_mode_menu_entries)
 					.selected_index(blend_mode.and_then(|blend_mode| blend_mode.index_in_list_svg_subset()).map(|index| index as u32))
@@ -2037,8 +2045,8 @@ impl DocumentMessageHandler {
 		}]);
 
 		responses.add(LayoutMessage::SendLayout {
-			layout: Layout::WidgetLayout(layers_panel_options_bar),
-			layout_target: LayoutTarget::LayersPanelOptions,
+			layout: Layout::WidgetLayout(layers_panel_control_bar),
+			layout_target: LayoutTarget::LayersPanelControlBar,
 		});
 	}
 
@@ -2295,7 +2303,7 @@ impl Iterator for ClickXRayIter<'_> {
 	}
 }
 
-// TODO: Eventually remove this (probably starting late 2024)
+// TODO: Eventually remove this document upgrade code
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct OldDocumentMessageHandler {
 	// ============================================
