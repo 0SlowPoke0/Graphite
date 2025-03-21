@@ -282,7 +282,7 @@ enum HandleMode {
 	ColinearEquidistant,
 }
 
-/// The type of handle which id dragged handle by the cursor (under the cursor)
+/// The type of handle which is dragged by the cursor (under the cursor)
 #[derive(Clone, Debug, Default, PartialEq, Copy)]
 enum TargetHandle {
 	HandleEnd,
